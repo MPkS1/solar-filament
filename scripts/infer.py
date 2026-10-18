@@ -20,8 +20,11 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--tile", type=int, default=512)
-    ap.add_argument("--threshold", type=float, default=0.5)
-    ap.add_argument("--min-area", type=int, default=40)
+    # Defaults are the measured optimum on the held-out split (see README
+    # "Results"). The competition default of 0.5/40 over-detects ~2.3x and
+    # costs roughly 0.15 PQ. Prefer scripts/tune_postprocess.py over guessing.
+    ap.add_argument("--threshold", type=float, default=0.8)
+    ap.add_argument("--min-area", type=int, default=600)
     ap.add_argument("--max-area-frac", type=float, default=0.05)
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()

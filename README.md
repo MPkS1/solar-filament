@@ -163,16 +163,75 @@ predictions, which is exactly the ambiguity the organizers removed.
 rather than a per-image mean, that IoU exactly 0.5 is *not* a true positive, and that a
 prediction with no GT scores 0 — and reproduces the 0.644 inter-annotator agreement from the EDA.
 
+## Results
+
+All numbers below use the official PQ rule (pooled over annotator-image entries on a
+by-frame held-out split, seed 42, so the model has never seen these frames).
+
+### The first run
+
+| | Value |
+|---|---|
+| Checkpoint | 40 epochs, crop 512, base 32, 7.77 M params |
+| Training-time `val_dice` | 0.6822 — **optimistic**, measured on filament-centred crops |
+| Held-out PQ, default post-processing (0.5 / 40) | 0.277 |
+| Held-out PQ, tuned post-processing (0.8 / 600) | **0.427** |
+| Held-out semantic Dice, tuned | 0.669 |
+| Submission produced by the run | 3176 rows, 180/180 frames, 17.6 instances/frame |
+
+### Post-processing is worth more than extra training
+
+16 held-out frames, 22 annotator-image entries, mean GT density 6.7 filaments per view:
+
+| threshold | min_area | instances/view | **PQ** | semantic Dice | TP/FP/FN |
+|---|---|---|---|---|---|
+| 0.50 | 40 (default) | 15.1 | 0.277 | 0.613 | 95 / 210 / 39 |
+| 0.50 | 600 | 8.8 | 0.373 | 0.637 | 88 / 81 / 46 |
+| 0.60 | 300 | 11.0 | 0.350 | 0.632 | 95 / 124 / 39 |
+| 0.70 | 600 | 8.2 | 0.391 | 0.656 | 87 / 74 / 47 |
+| **0.80** | **600** | 7.8 | **0.427** | 0.669 | 90 / 57 / 44 |
+| 0.85 | 600 | 7.4 | 0.412 | 0.672 | 84 / 58 / 50 |
+| 0.80 | 900 | 5.8 | 0.405 | 0.654 | 74 / 36 / 60 |
+| 0.80 | 300 | 10.1 | 0.398 | 0.659 | 101 / 101 / 33 |
+
+The default threshold over-detects 2.3x and that alone costs ~0.15 PQ — roughly as
+much as the gap between a working baseline and a good entry. The optimum is broad and
+flat (threshold 0.74–0.84, min_area 450–750 all land within ~0.01 of each other), so
+the exact argmax is not meaningful on this many frames; pick from the middle of the
+plateau.
+
+### The retired metric is not usable as a guide
+
+For the same 16 frames, the old per-instance Dice is *maximised* by predicting almost
+nothing:
+
+| threshold | min_area | instances/view | old `instance_wise_dice` | **PQ** |
+|---|---|---|---|---|
+| 0.90 | 2400 | 1.2 | **0.796** | 0.244 |
+| 0.85 | 1800 | 2.1 | 0.764 | 0.413 |
+| 0.75 | 600 | 6.1 | 0.730 | 0.632 |
+
+The configuration that wins the old metric loses three quarters of its PQ. Tuning
+against `instance_wise_dice` is actively harmful.
+
+### Ceiling
+
+Inter-annotator semantic Dice is **0.644** (598 pairs). The tuned model reaches 0.669
+semantic Dice against individual annotator views, i.e. it already agrees with a given
+annotator slightly *better* than two annotators agree with each other on the same
+frame. The remaining PQ loss is dominated by label disagreement, not model capacity:
+TP 90 vs FP 57 vs FN 44 means a third of ground-truth filaments are still missed.
+
 ## Baselines
 
 | Approach | Instances/img | median area px | Notes |
 |---|---|---|---|
 | Ground truth | ~7 | 1228 | reference |
 | Classical CV (`scripts/classical_baseline.py`) | 19.2 | 560 | 3077 rows over 160/180 frames, valid CSV, no training |
+| U-Net (40 epochs) + tuned post-processing | 7.8 | 836 | held-out PQ 0.427, semantic Dice 0.669 |
 
-The classical detector still over-fires (~2.7× the GT density) and leaves an
-occasional limb-arc false positive; it is a pipeline check and fallback, not a
-competitive entry (the public no-ML notebook scores ~0.46).
+The classical detector over-fires (~2.7× the GT density) and leaves an occasional
+limb-arc false positive; it is a pipeline check and fallback, not a competitive entry.
 
 ## References
 

@@ -83,8 +83,8 @@ def predict_logits_tiled(
 # --------------------------------------------------------------------------- #
 def prob_to_instances(
     prob: np.ndarray,
-    threshold: float = 0.5,
-    min_area: int = 40,
+    threshold: float = 0.8,
+    min_area: int = 600,
     fill: bool = True,
     disk: np.ndarray | None = None,
     max_area_frac: float | None = 0.05,
@@ -149,8 +149,8 @@ def run_inference(
     depth: int = 4,
     device: str = "cpu",
     tile: int = 512,
-    threshold: float = 0.5,
-    min_area: int = 40,
+    threshold: float = 0.8,
+    min_area: int = 600,
     max_area_frac: float | None = 0.05,
     relative_disk_radius: float | None = 0.98,
     limit: int | None = None,
