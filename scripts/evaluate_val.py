@@ -45,7 +45,7 @@ def main() -> None:
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--tile", type=int, default=512)
-    ap.add_argument("--threshold", type=float, default=0.84)
+    ap.add_argument("--threshold", type=float, default=0.88)
     ap.add_argument("--min-area", type=int, default=550)
     ap.add_argument("--limit", type=int, default=8, help="number of val frames to score")
     ap.add_argument("--offset", type=int, default=0, help="skip this many val frames first")

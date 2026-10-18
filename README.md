@@ -168,43 +168,57 @@ prediction with no GT scores 0 — and reproduces the 0.644 inter-annotator agre
 All numbers below use the official PQ rule (pooled over annotator-image entries on a
 by-frame held-out split, seed 42, so the model has never seen these frames).
 
-### The first run
+### The submission
 
-| | Value |
-|---|---|
-| Checkpoint | 40 epochs, crop 512, base 32, 7.77 M params |
-| Training-time `val_dice` | 0.6822 — **optimistic**, measured on filament-centred crops |
-| Held-out PQ, default post-processing (0.5 / 40) | 0.274 |
-| Held-out PQ, tuned post-processing (0.84 / 550) | **0.388** |
-| Held-out semantic Dice, tuned | 0.654 |
-| Submission produced by the run | 3176 rows, 180/180 frames, 17.6 instances/frame |
+| | earlier run | current run |
+|---|---|---|
+| Post-processing | 0.5 / 40 (default) | **0.88 / 550** (swept) |
+| Rows | 3176 | **1641** |
+| Test frames covered | 180 / 180 | 179 / 180 |
+| Instances per frame | 17.6 | **9.2** |
+| Median instance area | 836 px | **1246 px** (GT 1228) |
+| Held-out PQ | 0.270 | **0.424** |
+| Held-out semantic Dice | 0.605 | **0.682** |
+
+Model: 40 epochs, crop 512, base 32, 7.77 M params. The training-time `val_dice` (0.6847) is
+semantic Dice on *filament-centred* crops, so it is optimistic and not comparable to these
+numbers: every crop is guaranteed to contain a filament, so the model is never asked how
+confident it should be on background.
+
+One test frame (`20200310113230Ch`, March 2020 — solar minimum) receives no predictions at
+all above the tuned threshold. It is not a corrupt frame; it simply has no dark region
+confident enough to survive the filter.
 
 ### Post-processing is worth more than extra training
 
-32 held-out frames, 47 annotator-image entries, mean GT density 7.9 filaments per view:
+From the notebook's own sweep — 16 held-out frames, 22 annotator-image entries, mean GT
+density 6.7 filaments per view:
 
 | threshold | min_area | instances/view | **PQ** | semantic Dice | TP/FP/FN |
 |---|---|---|---|---|---|
-| 0.50 | 40 (default) | 18.4 | 0.274 | 0.607 | 260 / 582 / 99 |
-| 0.84 | 40 | 15.9 | 0.326 | 0.647 | 272 / 460 / 87 |
-| 0.50 | 550 | 11.1 | 0.350 | 0.624 | 238 / 262 / 121 |
-| 0.80 | 600 | 9.4 | 0.380 | 0.648 | 230 / 197 / 129 |
-| 0.75 | 600 | 9.8 | 0.383 | 0.645 | 238 / 207 / 121 |
-| 0.88 | 450 | 10.2 | 0.385 | 0.657 | 240 / 229 / 119 |
-| **0.84** | **550** | 9.6 | **0.388** | 0.654 | 235 / 200 / 124 |
+| 0.50 | 40 (old default) | 15.5 | 0.270 | 0.605 | 93 / 217 / 41 |
+| 0.70 | 40 | 14.6 | 0.298 | 0.629 | 97 / 197 / 37 |
+| 0.84 | 40 | 13.1 | 0.328 | 0.656 | 97 / 166 / 37 |
+| 0.50 | 550 | 9.2 | 0.351 | 0.629 | 86 / 96 / 48 |
+| 0.80 | 900 | 6.1 | 0.388 | 0.660 | 72 / 45 / 62 |
+| 0.84 | 550 | 8.0 | 0.412 | 0.676 | 88 / 67 / 46 |
+| **0.88** | **550** | 7.5 | **0.424** | 0.682 | 87 / 57 / 47 |
+| 0.90 | 450 | 8.0 | 0.433 | 0.685 | 92 / 63 / 42 |
 
-Two independent effects, the second easy to miss:
+Two separable effects, the second easy to miss:
 
-* **threshold 0.5 → 0.84** at a fixed `min_area` of 550: 0.350 → 0.388;
-* **`min_area` 40 → 550** at a fixed threshold of 0.84: 0.326 → 0.388. The area floor alone is
-  worth ~0.06 PQ: the smallest real filament is ~209 px (p1) and the median is 1228 px, so
-  anything much below that is near-certainly a false positive.
+* **threshold 0.5 → 0.88** at a fixed `min_area` of 550: 0.351 → 0.424;
+* **`min_area` 40 → 550** at a fixed threshold of 0.84: 0.328 → 0.412. The area floor alone is
+  worth ~0.08 PQ, because the smallest real filament is ~209 px (p1) and the median is 1228 px,
+  so anything far below that is near-certainly a false positive.
 
-Together they recover **+0.114 PQ with no retraining**. The tuned region is broad and flat
-(threshold 0.80–0.88 × min_area 450–600 spans 0.377–0.388), so the argmax is not meaningful on
-this many frames. The shipped defaults are the joint optimum over 32 frames, and they also won
-each 16-frame half independently — 0.433 and 0.363 on the two disjoint halves, against 0.277
-and 0.272 for the default.
+Together they recover **+0.154 PQ with no retraining**, and the predicted instance-area
+distribution lands on the ground truth (median 1246 px vs 1228 px) instead of running small.
+
+The plateau is broad — threshold 0.84–0.92 × min_area 450–550 all land within ~0.02 — so the
+argmax is not meaningful on 16 frames. An independent check on a disjoint 16 frames (frames
+16–31, previous checkpoint) confirmed the direction of the effect: 0.272 for the default
+against 0.354–0.373 across the tuned region.
 
 ### The retired metric is not usable as a guide
 
@@ -223,12 +237,24 @@ exactly why the organizers retired it. Tuning against `instance_wise_dice` is ac
 
 ### Ceiling
 
-Inter-annotator semantic Dice is **0.644** (598 pairs). Over the 32 held-out frames the tuned
-model reaches **0.654** semantic Dice against individual annotator views — it agrees with a
-given annotator about as well as two annotators agree with each other on the same frame. The
-residual PQ loss is therefore dominated by label disagreement rather than model capacity:
-TP 235 vs FP 200 vs **FN 124** means about a third of ground-truth filaments are still missed,
-and a further third of the predictions land on filaments no annotator marked.
+Inter-annotator semantic Dice is **0.644** (598 pairs). The tuned model reaches **0.682**
+semantic Dice against individual annotator views — it agrees with a given annotator slightly
+*better* than two annotators agree with each other on the same frame. The residual PQ loss is
+therefore dominated by label disagreement rather than model capacity: at 0.88 / 550 the counts
+are TP 87 / FP 57 / **FN 47**, i.e. about a third of ground-truth filaments are missed while
+about four predictions in ten land on filaments no annotator marked. Further gains need a
+stronger model or multi-view consensus targets, not more threshold tuning.
+
+### One idea that did not work
+
+`20200310113230Ch` (March 2020, solar minimum) receives no predictions at all, yet the model
+reaches 0.99 confidence there on a ~444 px dark region — a plausible small filament silently
+discarded by the 550 px floor. A two-tier rule was therefore implemented: relax the area floor
+for components whose *peak* probability is very high. It scored **worse at every setting**
+(0.418 versus 0.424 at 0.88 / 550, and down to 0.384 as the gate widened): it rescued a few
+genuine small filaments but admitted more false positives, and PQ prices a miss and a spurious
+mask identically. The flat floor was kept and the idea reverted rather than shipped as dead
+code.
 
 ## Baselines
 
@@ -236,7 +262,7 @@ and a further third of the predictions land on filaments no annotator marked.
 |---|---|---|---|
 | Ground truth | ~7 | 1228 | reference |
 | Classical CV (`scripts/classical_baseline.py`) | 19.2 | 560 | 3077 rows over 160/180 frames, valid CSV, no training |
-| U-Net (40 epochs) + tuned post-processing | 9.6 | 836 | held-out PQ 0.388, semantic Dice 0.654 |
+| U-Net (40 epochs) + swept post-processing | 9.2 | 1246 | held-out PQ 0.424, semantic Dice 0.682 |
 
 The classical detector over-fires (~2.7× the GT density) and leaves an occasional
 limb-arc false positive; it is a pipeline check and fallback, not a competitive entry.

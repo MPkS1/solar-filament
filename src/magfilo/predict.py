@@ -83,7 +83,7 @@ def predict_logits_tiled(
 # --------------------------------------------------------------------------- #
 def prob_to_instances(
     prob: np.ndarray,
-    threshold: float = 0.84,
+    threshold: float = 0.88,
     min_area: int = 550,
     fill: bool = True,
     disk: np.ndarray | None = None,
@@ -92,6 +92,11 @@ def prob_to_instances(
     """Probability map -> int32 label map (0 background, 1..K instances).
 
     ``disk`` is an optional {0,1} mask restricting predictions to the solar disc.
+
+    A flat ``min_area`` floor is used deliberately. A confidence-gated variant
+    (relax the floor for components with a high peak probability) was implemented
+    and measured: it rescues a few small genuine filaments but admits more false
+    positives, and PQ prices both at 0.5, so it scored worse at every setting.
     """
     binary = (prob >= threshold).astype(np.uint8)
     if disk is not None:
@@ -149,7 +154,7 @@ def run_inference(
     depth: int = 4,
     device: str = "cpu",
     tile: int = 512,
-    threshold: float = 0.84,
+    threshold: float = 0.88,
     min_area: int = 550,
     max_area_frac: float | None = 0.05,
     relative_disk_radius: float | None = 0.98,

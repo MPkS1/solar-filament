@@ -2,8 +2,9 @@
 MAGFiLO_1.0_Kaggle_2026/
 *.zip
 
-# --- Kaggle output download (a nested clone of this repo) ---
+# --- Kaggle output downloads (nested clones of this repo) ---
 solar-filament/
+newr/
 
 # --- Generated artefacts ---
 outputs/
