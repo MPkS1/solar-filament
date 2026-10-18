@@ -1,0 +1,154 @@
+# Solar Filament Segmentation Challenge 2026 — local workspace
+
+Kaggle competition: **`filament-segmentation-2026`** (IEEE BigData Cup 2026) — instance
+segmentation of solar filaments in 2048×2048 GONG H-alpha observations (MAGFiLO 1.0).
+
+This folder holds local tooling, EDA and (later) the training/inference code. Training is
+planned on **Kaggle notebooks** (this machine is CPU-only).
+
+## Dataset layout (`MAGFiLO_1.0_Kaggle_2026/`)
+
+```
+train/train_images/   707 physical images (.jpeg, 2048x2048, grayscale)
+train/MAGFiLO_1.0_Annotations_kaggle2026_train.json   (46 MB COCO)
+test/test_images/     180 images, no labels
+```
+
+## Submission format (from the competition's Submission File page)
+
+```
+filament_id,segmentation_rle
+20150125172714Mh_1,f8uSDds...
+20150125172714Mh_2,...
+```
+
+* `filament_id` = `<file stem>_<n>`, unique per row.
+* `segmentation_rle` = pycocotools RLE **counts only** (no size, no quotes).
+* Masks are always 2048×2048.
+
+## Evaluation
+
+* Leaderboard = `instance_wise_dice` (custom, instance-wise). Public LB scores only ~50% of
+  the 180 test images → differences below ~0.01 are noise.
+* Final rubric = **70% quantitative / 30% qualitative**. Quantitative = mean Dice
+  (`torchmetrics.segmentation.DiceScore`), Dice/IoU distributions, and the distribution of
+  one-to-many / many-to-one GT↔prediction relations. Qualitative = pipeline writeup,
+  morphology figures, code quality.
+
+## EDA highlights (see `outputs/eda/`)
+
+| Quantity | Value |
+|---|---|
+| Physical train images / annotator views / filaments | 707 / 1154 / 8199 |
+| Views per image | 1: 411, 2: 145, 3: 151 (296 multi-rater) |
+| Filaments per view | mean 7.1, median 7, max 26 |
+| Classes | Left 2535, Right 2590, Unidentifiable 3074, **Ambiguous 0** |
+| Filament area (px) | p50 1228, p90 4685, p99 13703 |
+| Filament pixels as fraction of frame | ≈ 0.36 % |
+| BBox elongation | p50 1.66, p90 3.23 |
+| Spine length (px) | p50 111, p90 285 (present for 100 % of annotations) |
+| Solar disk radius | ≈ 937 px at 2048 (disk nearly fills the frame) |
+| **Local contrast** (filament vs immediate ring) | median **+10.5**, filament darker in **99.8 %** of cases |
+| **Inter-annotator agreement** (semantic Dice) | mean **0.644**, p10 0.474, p50 0.675, p90 0.785; 12 % of pairs < 0.5 |
+
+### Implications
+
+1. **Label noise bounds the score.** Two expert annotators agree at only ~0.64 Dice on the
+   same frame — no model can exceed the ground truth by more than the ground truths agree
+   with each other. It is not worth chasing tiny LB decimals; prefer robust, well-documented
+   methods and coverage.
+2. **Class labels are unreliable.** The `Ambiguous` class is absent and the same filament is
+   labelled differently by different annotators (see `fig_multi_view.png`). The competition
+   scores *segmentation masks only* → predict binary instance masks, ignore category.
+3. **Filaments are hard for global thresholding.** They are darker than their *local*
+   surroundings ~always, but only ~28 % of views show the effect against the whole disc
+   (limb darkening, plage and other dark structures confound a global threshold). Local /
+   learned features are needed.
+4. **Extreme foreground imbalance.** Filaments are ~0.36 % of pixels → use Dice/Tversky
+   style losses, not plain BCE; tile/batch sampling matters.
+5. **Copy the framing.** Disk radius is nearly constant (~937 px) → mask to the disc and
+   normalise per-frame; the four-character instrument suffix in the filename may be a useful
+   domain signal.
+
+## Layout
+
+```
+src/magfilo/            reusable toolkit
+  paths.py              dataset locations (MAGFILO_ROOT override)
+  coco.py               COCO loader -> View objects, multi-view indexing
+  rle.py                polygons <-> mask, mask -> RLE counts
+  disk.py               solar-disc geometry
+  metrics.py            local replica of the scoring (instance-wise Dice, PQ, ...)
+  data.py               torch Dataset, by-frame splits, rasterisation, augmentation
+  model.py              pure-torch U-Net + losses
+  predict.py            tiled inference -> instances -> submission CSV
+  runtime.py            device selection
+scripts/
+  eda.py                EDA: stats.json + figures
+  test_metrics.py       analytic checks for the metric replica
+  train.py              CLI training loop
+  infer.py              CLI inference -> submission.csv
+  classical_baseline.py no-ML fallback submission
+  evaluate_val.py       score a checkpoint on the held-out split
+  validate_submission.py format + integrity checks, optional preview
+  debug_intensity.py    sanity check for the intensity measurement
+  debug_classical.py    parameter exploration for the classical baseline
+kaggle/                 notebook + packaging notes
+outputs/                generated (git-ignored)
+```
+
+## Pipeline
+
+```powershell
+# 1. metrics (fast, no GPU)
+python scripts/test_metrics.py
+
+# 2. smoke-test the training plumbing on CPU
+python scripts/train.py --smoke
+
+# 3. real training (Kaggle GPU)
+python scripts/train.py --epochs 40 --batch 16 --crop 512 --base 32 --workers 2
+
+# 4. score on the held-out split (local metric replica)
+python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 12
+
+# 5. predict the test set and validate
+python scripts/infer.py --checkpoint checkpoints/unet.pt --out outputs/submissions/submission.csv
+python scripts/validate_submission.py outputs/submissions/submission.csv --visualize 6
+
+# no-ML fallback (valid submission, runs on CPU in minutes)
+python scripts/classical_baseline.py
+```
+
+## Metric replica
+
+`src/magfilo/metrics.py` reconstructs the competition's `instance_wise_dice`
+and Panoptic Quality from the described semantics:
+
+* **CC re-instancing** — touching masks merge and holes fill before scoring.
+* **All-pairs overlap matching** — a GT instance matches every prediction it
+  overlaps by ≥1 pixel (not Hungarian).
+* **Per-pair Dice** = `2|I| / (|GT| + |Pred|)`.
+* An image with **no predictions emits no rows** (free under the per-pair mean,
+  zero under a per-image semantic mean).
+
+`python scripts/test_metrics.py` validates this with 18 analytic cases and
+reproduces the 0.644 inter-annotator agreement from the EDA.
+
+## Baselines
+
+| Approach | Instances/img | median area px | Notes |
+|---|---|---|---|
+| Ground truth | ~7 | 1228 | reference |
+| Classical CV (`scripts/classical_baseline.py`) | 19.2 | 560 | 3077 rows over 160/180 frames, valid CSV, no training |
+
+The classical detector still over-fires (~2.7× the GT density) and leaves an
+occasional limb-arc false positive; it is a pipeline check and fallback, not a
+competitive entry (the public no-ML notebook scores ~0.46).
+
+## References
+
+* Competition: <https://www.kaggle.com/competitions/filament-segmentation-2026>
+* MAGFiLO dataset paper: <https://doi.org/10.1038/s41597-024-03876-y>
+* Organizers' sibling evaluator (metric semantics): `dataresearchlab/unet_filament_detection`
+

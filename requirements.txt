@@ -1,0 +1,7 @@
+# Local dev is CPU-only. On Kaggle most of these are pre-installed; the
+# notebook only needs to ensure pycocotools is present.
+numpy>=1.24
+opencv-python>=4.8
+pycocotools>=2.0.7
+torch>=2.1
+matplotlib>=3.7   # EDA only

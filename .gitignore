@@ -1,0 +1,21 @@
+# --- Data (750 MB, never commit) ---
+MAGFiLO_1.0_Kaggle_2026/
+*.zip
+
+# --- Generated artefacts ---
+outputs/
+checkpoints/
+*.png
+*.jpg
+*.jpeg
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
+
+# --- Tooling ---
+.pytest_cache/
