@@ -3,8 +3,8 @@
 Kaggle competition: **`filament-segmentation-2026`** (IEEE BigData Cup 2026) — instance
 segmentation of solar filaments in 2048×2048 GONG H-alpha observations (MAGFiLO 1.0).
 
-This folder holds local tooling, EDA and (later) the training/inference code. Training is
-planned on **Kaggle notebooks** (this machine is CPU-only).
+This folder holds the toolkit, EDA, training/inference code and the Kaggle packaging. Training
+runs on **Kaggle notebooks** (this machine is CPU-only and is used for development).
 
 ## Dataset layout (`MAGFiLO_1.0_Kaggle_2026/`)
 
@@ -28,12 +28,22 @@ filament_id,segmentation_rle
 
 ## Evaluation
 
-* Leaderboard = `instance_wise_dice` (custom, instance-wise). Public LB scores only ~50% of
-  the 180 test images → differences below ~0.01 are noise.
+* **Leaderboard ranking = Panoptic Quality (PQ).** The organizers replaced the original
+  per-instance Dice on 2026-08-07 — a per-instance Dice forces an arbitrary decision about
+  unmatched predictions — and re-scored the leaderboard on 2026-08-12. The number *displayed*
+  on the scoreboard is the mean Dice (`torchmetrics.segmentation.DiceScore`); the *ranking*
+  is PQ. Do not tune against `instance_wise_dice`.
+* PQ is pooled over annotator-image entries, a match requires **IoU > 0.5**, and
+  `PQ = sum(IoU of TP) / (|TP| + 0.5|FP| + 0.5|FN)`. Both false positives and false negatives
+  cost 0.5 each, so the metric is not gameable: predicting nothing scores 0, and flooding the
+  frame with masks scores ≈0. The organizers state that **PQ > 0.35 is "of great value"**.
+* Public LB scores only ~50% of the 180 test images → differences below ~0.01 are noise.
 * Final rubric = **70% quantitative / 30% qualitative**. Quantitative = mean Dice
-  (`torchmetrics.segmentation.DiceScore`), Dice/IoU distributions, and the distribution of
-  one-to-many / many-to-one GT↔prediction relations. Qualitative = pipeline writeup,
-  morphology figures, code quality.
+  (`torchmetrics.segmentation.DiceScore`), the PQ metric itself, Dice/IoU distributions, and
+  the distribution of one-to-many / many-to-one GT↔prediction relations. Qualitative =
+  pipeline writeup, morphology figures, code quality. A public GitHub repo, a pinned
+  `requirements.txt` and a notebook covering the whole pipeline are **required** for final
+  evaluation.
 
 ## EDA highlights (see `outputs/eda/`)
 
@@ -78,18 +88,21 @@ src/magfilo/            reusable toolkit
   coco.py               COCO loader -> View objects, multi-view indexing
   rle.py                polygons <-> mask, mask -> RLE counts
   disk.py               solar-disc geometry
-  metrics.py            local replica of the scoring (instance-wise Dice, PQ, ...)
+  metrics.py            official PQ (`pq_pooled`) + legacy instance-wise Dice diagnostics
   data.py               torch Dataset, by-frame splits, rasterisation, augmentation
   model.py              pure-torch U-Net + losses
   predict.py            tiled inference -> instances -> submission CSV
+  cache.py              disk cache for full-resolution probability maps
   runtime.py            device selection
 scripts/
   eda.py                EDA: stats.json + figures
-  test_metrics.py       analytic checks for the metric replica
+  test_metrics.py       analytic checks for the metric implementation
   train.py              CLI training loop
   infer.py              CLI inference -> submission.csv
   classical_baseline.py no-ML fallback submission
-  evaluate_val.py       score a checkpoint on the held-out split
+  evaluate_val.py       score a checkpoint on the held-out split (official PQ)
+  tune_postprocess.py   sweep threshold x min_area, ranked by official PQ
+  inspect_checkpoint.py print a checkpoint's args + recorded validation score
   validate_submission.py format + integrity checks, optional preview
   debug_intensity.py    sanity check for the intensity measurement
   debug_classical.py    parameter exploration for the classical baseline
@@ -109,8 +122,11 @@ python scripts/train.py --smoke
 # 3. real training (Kaggle GPU)
 python scripts/train.py --epochs 40 --batch 16 --crop 512 --base 32 --workers 2
 
-# 4. score on the held-out split (local metric replica)
-python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 12
+# 4. score on the held-out split with the OFFICIAL PQ rule
+python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 16
+
+# 4b. tune post-processing (probability maps are cached; re-runs are cheap)
+python scripts/tune_postprocess.py --checkpoint checkpoints/unet.pt --limit 16
 
 # 5. predict the test set and validate
 python scripts/infer.py --checkpoint checkpoints/unet.pt --out outputs/submissions/submission.csv
@@ -120,20 +136,32 @@ python scripts/validate_submission.py outputs/submissions/submission.csv --visua
 python scripts/classical_baseline.py
 ```
 
-## Metric replica
+## Metric implementation
 
-`src/magfilo/metrics.py` reconstructs the competition's `instance_wise_dice`
-and Panoptic Quality from the described semantics:
+`src/magfilo/metrics.py` contains two layers.
 
-* **CC re-instancing** — touching masks merge and holes fill before scoring.
-* **All-pairs overlap matching** — a GT instance matches every prediction it
-  overlaps by ≥1 pixel (not Hungarian).
-* **Per-pair Dice** = `2|I| / (|GT| + |Pred|)`.
-* An image with **no predictions emits no rows** (free under the per-pair mean,
-  zero under a per-image semantic mean).
+**`pq_pooled` — the leaderboard metric.** A faithful re-implementation of the organizers' own
+`Self_Evaluation_Notebook` (`get_pq_score`), verified against it by reading the published
+source. Three properties are easy to get wrong:
 
-`python scripts/test_metrics.py` validates this with 18 analytic cases and
-reproduces the 0.644 inter-annotator agreement from the EDA.
+* **One entry per annotator-image.** GT is keyed `<annotator_id>-<image_id>`, so a frame with
+  three annotators is scored three times against the same prediction — it contributes 3× its
+  true positives *and* 3× its false positives. Scoring against a single "best" annotator view
+  understates the penalty.
+* **Pooled globally, not averaged per image.** TP/FP/FN accumulate across every entry and one
+  global `sum(IoU_TP) / (|TP| + .5|FP| + .5|FN)` is formed. A per-image mean gives a
+  systematically different (usually higher) number.
+* **Raw masks.** The official scorer decodes RLEs and computes IoU directly — it does *not*
+  merge touching masks or fill holes.
+
+**`score_dataset` — the older per-instance Dice machinery** (all-pairs overlap matching with
+optional CC re-instancing, per-pair Dice, one-to-many / many-to-one bookkeeping). Kept as a
+diagnostic only; note that its `pairs` mean is *free* for unmatched GT and unmatched
+predictions, which is exactly the ambiguity the organizers removed.
+
+`python scripts/test_metrics.py` runs **26 analytic checks** — including that PQ is pooled
+rather than a per-image mean, that IoU exactly 0.5 is *not* a true positive, and that a
+prediction with no GT scores 0 — and reproduces the 0.644 inter-annotator agreement from the EDA.
 
 ## Baselines
 
@@ -150,5 +178,6 @@ competitive entry (the public no-ML notebook scores ~0.46).
 
 * Competition: <https://www.kaggle.com/competitions/filament-segmentation-2026>
 * MAGFiLO dataset paper: <https://doi.org/10.1038/s41597-024-03876-y>
-* Organizers' sibling evaluator (metric semantics): `dataresearchlab/unet_filament_detection`
+* PQ paper: <https://doi.org/10.1109/CVPR.2019.00963>
+* Organizers' scorer (authoritative): <https://www.kaggle.com/code/azimahmadzadeh/self-evaluation-notebook>
 

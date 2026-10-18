@@ -1,12 +1,29 @@
 """Local replica of the competition's scoring.
 
-The leaderboard metric is `instance_wise_dice`; the published rubric scores
-mean Dice (`torchmetrics DiceScore`, foreground-only), Dice/IoU distributions,
-and the distribution of one-to-many / many-to-one GT<->prediction relations.
-We also provide Panoptic Quality, since the overview page names PQ as the
-primary criterion.
+**The leaderboard metric is Panoptic Quality, not Dice.** The organizers
+announced on 2026-08-07 that the evaluation methodology was being replaced to
+address raised issues (the original per-instance Dice forced an arbitrary
+decision about unmatched instances) and on 2026-08-12 that the leaderboard had
+been re-scored. The overview now states that the *primary* criterion is PQ
+(10.1109/CVPR.2019.00963); the number *displayed* on the scoreboard is the mean
+Dice (`torchmetrics.segmentation.DiceScore`).
 
-Key semantics recovered from the organizers' public sibling evaluator
+The authoritative implementation is the organizers' own
+`Self_Evaluation_Notebook` (kaggle.com/code/azimahmadzadeh/self-evaluation-notebook).
+`pq_pooled` below is a faithful re-implementation of its `get_pq_score`, with
+three properties that differ from the earlier per-image replica:
+
+1. **Pooled, not per-image.** TP/FP/FN are accumulated over every entry and one
+   global ``sum(IoU_TP) / (|TP| + .5|FP| + .5|FN)`` is formed.
+2. **One entry per annotator-image.** GT is keyed ``"<annotator>-<image>"``, so
+   an image with three annotators is scored three times against the same
+   prediction -- it contributes 3x its TPs *and* 3x its FPs.
+3. **Raw masks.** The official scorer decodes RLEs and computes IoU directly; it
+   does **not** merge touching masks or fill holes. The CC re-instancing below
+   belongs to the older evaluator and is kept only as a diagnostic.
+
+`instance_wise_dice` is retained as a secondary diagnostic. Its semantics come
+from the organizers' earlier public sibling evaluator
 (`dataresearchlab/unet_filament_detection: eval_instancewise.py`):
 
 * **CC re-instancing** -- instance masks that touch are merged and interior
@@ -237,3 +254,101 @@ def score_dataset(
         "n_images": len(names), "n_images_with_pairs": len(image_pair_means),
     }
     return ScoreReport(metrics=metrics, per_image=per_image)
+
+
+# --------------------------------------------------------------------------- #
+# official Panoptic Quality (organizers' Self_Evaluation_Notebook)
+# --------------------------------------------------------------------------- #
+def iou_overlap_matrix(gt_labels: np.ndarray, pred_labels: np.ndarray) -> np.ndarray:
+    """Pairwise IoU between two label maps, as an (n_gt, n_pred) array.
+
+    Row ``i`` is GT instance ``i + 1``, column ``j`` is prediction ``j + 1``.
+    This is the ``iou_matrix`` of the organizers' ``get_overlap_matrices``.
+    """
+    gk, pk = int(gt_labels.max()), int(pred_labels.max())
+    if gk == 0 or pk == 0:
+        return np.zeros((gk, pk), dtype=np.float64)
+
+    g = gt_labels.ravel().astype(np.int64)
+    p = pred_labels.ravel().astype(np.int64)
+    both = (g > 0) & (p > 0)
+    combo = np.bincount(g[both] * (pk + 1) + p[both],
+                        minlength=(gk + 1) * (pk + 1)).reshape(gk + 1, pk + 1)
+    g_area = np.bincount(g, minlength=gk + 1)[1:]
+    p_area = np.bincount(p, minlength=pk + 1)[1:]
+
+    inter = combo[1:, 1:].astype(np.float64)
+    union = g_area[:, None].astype(np.float64) + p_area[None, :].astype(np.float64) - inter
+    return np.divide(inter, union, out=np.zeros_like(inter), where=union > 0)
+
+
+@dataclass
+class PQReport:
+    """Pooled Panoptic Quality over a set of annotator-image entries."""
+
+    pq: float
+    tp: int
+    fp: int
+    fn: int
+    tp_iou_sum: float
+    n_entries: int
+    semantic_dice_mean: float
+
+    def __str__(self) -> str:  # pragma: no cover - cosmetic
+        return (f"  PQ (official, pooled)  {self.pq:.4f}\n"
+                f"  TP / FP / FN           {self.tp} / {self.fp} / {self.fn}\n"
+                f"  sum(IoU of TP)         {self.tp_iou_sum:.2f}\n"
+                f"  entries (annot-image)  {self.n_entries}\n"
+                f"  semantic Dice (mean)   {self.semantic_dice_mean:.4f}")
+
+
+def pq_pooled(entries, iou_thr: float = 0.5) -> PQReport:
+    """Organizers' ``get_pq_score``: pooled PQ over annotator-image entries.
+
+    ``entries`` is an iterable of ``(gt_labels, pred_labels)`` int32 label maps,
+    consumed lazily -- one entry per annotator-image, i.e. every annotator view
+    is scored separately against the same prediction for that image.
+
+    A pair is a TP when ``IoU > iou_thr`` (0.5). A prediction that hits no GT in
+    its entry is an FP; a GT that no prediction hits is an FN. Entries with no GT
+    (or no prediction) contribute pure FP (or pure FN).
+
+    Example:
+        >>> rep = pq_pooled([(gt_labels, pred_labels)])
+        >>> round(rep.pq, 3)
+    """
+    tp_ious: list[float] = []
+    fp = fn = 0
+    sem: list[float] = []
+    n_entries = 0
+
+    for gt_labels, pred_labels in entries:
+        n_entries += 1
+        gk, pk = int(gt_labels.max()), int(pred_labels.max())
+        sem.append(semantic_dice(gt_labels > 0, pred_labels > 0))
+
+        if gk == 0:
+            fp += pk
+            continue
+        if pk == 0:
+            fn += gk
+            continue
+
+        iou = iou_overlap_matrix(gt_labels, pred_labels)
+        hit = iou > iou_thr
+        tp_ious.extend(iou[hit].tolist())
+        fp += int((hit.sum(axis=0) == 0).sum())
+        fn += int((hit.sum(axis=1) == 0).sum())
+
+    tp = len(tp_ious)
+    denom = tp + 0.5 * fp + 0.5 * fn
+    return PQReport(
+        pq=(sum(tp_ious) / denom) if denom else 0.0,
+        tp=tp, fp=fp, fn=fn, tp_iou_sum=float(sum(tp_ious)),
+        n_entries=n_entries,
+        semantic_dice_mean=float(np.mean(sem)) if sem else float("nan"),
+    )
+
+
+# alias matching the organizers' function name
+get_pq_score = pq_pooled

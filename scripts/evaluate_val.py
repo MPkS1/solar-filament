@@ -1,8 +1,14 @@
-"""Offline evaluation on the held-out split using the local metric replica.
+"""Offline evaluation on the held-out split, using the official scoring rule.
 
-For each val physical frame we predict instances with the U-Net, rasterise each
-annotator's ground truth, and score with `magfilo.metrics` (instance-wise Dice,
-semantic Dice, Panoptic Quality, one-to-many / many-to-one relations).
+The leaderboard ranks submissions by **Panoptic Quality**. `magfilo.metrics.
+pq_pooled` is a faithful re-implementation of the organizers'
+`Self_Evaluation_Notebook`, so the number printed here is the number the
+leaderboard would show -- with the caveat that it is measured on our own
+held-out split, against MAGFiLO's multiple annotator views.
+
+Every annotator view is scored separately against the same prediction (that is
+what the official scorer does: GT is keyed ``"<annotator>-<image>"``), and the
+TP/FP/FN counts are pooled before forming PQ.
 
 Example:
     python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 8
@@ -20,12 +26,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from magfilo import paths  # noqa: E402
+from magfilo.cache import cached_prob_map  # noqa: E402
 from magfilo.coco import load_coco  # noqa: E402
-from magfilo.data import read_image, split_stems, views_for_stems  # noqa: E402
-from magfilo.metrics import score_dataset  # noqa: E402
-from magfilo.predict import load_model, predict_logits_tiled, prob_to_instances  # noqa: E402
-from magfilo.data import rasterize_view_instances  # noqa: E402
+from magfilo.data import rasterize_view_instances, read_image, split_stems  # noqa: E402
 from magfilo.disk import disk_mask  # noqa: E402
+from magfilo.metrics import pq_pooled, score_dataset  # noqa: E402
+from magfilo.predict import load_model, prob_to_instances  # noqa: E402
 from magfilo.runtime import pick_device  # noqa: E402
 from magfilo.viz import overlay_polygons, panel  # noqa: E402
 
@@ -39,9 +45,11 @@ def main() -> None:
     ap.add_argument("--val-frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--tile", type=int, default=512)
-    ap.add_argument("--threshold", type=float, default=0.5)
-    ap.add_argument("--min-area", type=int, default=40)
+    ap.add_argument("--threshold", type=float, default=0.7)
+    ap.add_argument("--min-area", type=int, default=600)
     ap.add_argument("--limit", type=int, default=8, help="number of val frames to score")
+    ap.add_argument("--offset", type=int, default=0, help="skip this many val frames first")
+    ap.add_argument("--refresh-cache", action="store_true", help="ignore cached probability maps")
     ap.add_argument("--save-fig", default=None, help="render GT vs prediction panels here")
     ap.add_argument("--fig-frames", type=int, default=6)
     args = ap.parse_args()
@@ -50,42 +58,50 @@ def main() -> None:
     model = load_model(args.checkpoint, base=args.base, depth=args.depth, device=device)
 
     coco = load_coco()
-    train_stems, val_stems = split_stems(coco, args.val_frac, args.seed)
-    stems = val_stems[: args.limit]
-    print(f"scoring {len(stems)} held-out frames on {device}")
+    _, val_stems = split_stems(coco, args.val_frac, args.seed)
+    stems = val_stems[args.offset: args.offset + args.limit]
+    print(f"scoring {len(stems)} held-out frames on {device} "
+          f"(val split index {args.offset}..{args.offset + len(stems) - 1})")
+    print(f"post-processing: threshold={args.threshold} min_area={args.min_area}")
 
     pred_maps: dict[str, np.ndarray] = {}
     for stem in stems:
         gray = read_image(paths.TRAIN_IMAGES / f"{stem}.jpeg")
-        logits = predict_logits_tiled(model, gray, device=device, tile=args.tile)
-        prob = 1.0 / (1.0 + np.exp(-logits))
-        disk = disk_mask(gray, relative_radius=0.98)
-        labels = prob_to_instances(prob, threshold=args.threshold, min_area=args.min_area, disk=disk)
+        prob = cached_prob_map(paths.TRAIN_IMAGES / f"{stem}.jpeg", model, device,
+                               tile=args.tile, refresh=args.refresh_cache, gray=gray)
+        labels = prob_to_instances(prob, threshold=args.threshold, min_area=args.min_area,
+                                   disk=disk_mask(gray, relative_radius=0.98))
         pred_maps[stem] = labels
 
-    # score against the densest annotator view for each frame
-    gt_by_view: dict[str, np.ndarray] = {}
-    for stem in stems:
-        views = coco.by_stem[stem]
-        densest = max(views, key=lambda v: v.n_filaments)
-        gt_by_view[stem] = _view_labels(densest)
+    views_by_stem = {s: [rasterize_view_instances(v, 2048, 1.0).astype(np.int32)
+                         for v in coco.by_stem[s]] for s in stems}
 
-    rep = score_dataset(gt_by_view, pred_maps)
-    print("\n=== instance_wise_dice (CC-reinstanced) ===")
+    # --- official metric: pooled PQ over every annotator-image entry ---------
+    rep = pq_pooled((gt, pred_maps[stem])
+                    for stem, views in views_by_stem.items() for gt in views)
+    print("\n=== official scoring (organizers' Self_Evaluation_Notebook) ===")
     print(rep)
-    print("\nper-frame sample:")
-    for row in rep.per_image[:8]:
-        print(f"  {row['image']:<22} n_gt={row['n_gt']:<3} n_pred={row['n_pred']:<3} "
-              f"pq={row['pq']:.2f} sem={row['sem_dice']:.3f} pairs={row['n_pairs']}")
 
-    # also without CC reinstancing for comparison
-    rep_raw = score_dataset(gt_by_view, pred_maps, reinstantiate=False)
-    print("\n=== instance_wise_dice (raw masks, no CC) ===")
-    print("  pairs", f"{rep_raw.metrics['instance_wise_dice/pairs']:.4f}",
-          " image", f"{rep_raw.metrics['instance_wise_dice/image']:.4f}")
+    print("\nper-frame (PQ computed over that frame's annotator views):")
+    for stem in stems:
+        sub = pq_pooled((gt, pred_maps[stem]) for gt in views_by_stem[stem])
+        n_gt = int(np.mean([int(g.max()) for g in views_by_stem[stem]]))
+        print(f"  {stem:<22} views={len(views_by_stem[stem])} n_gt={n_gt:<3} "
+              f"n_pred={int(pred_maps[stem].max()):<3} PQ={sub.pq:.3f} "
+              f"sem={sub.semantic_dice_mean:.3f} "
+              f"TP/FP/FN={sub.tp}/{sub.fp}/{sub.fn}")
+
+    # --- secondary diagnostics (older evaluator) ----------------------------
+    densest = {s: max(views_by_stem[s], key=lambda g: int(g.max())) for s in stems}
+    diag = score_dataset(densest, pred_maps, reinstantiate=False)
+    print("\n=== diagnostic: instance_wise_dice vs densest view (not the leaderboard) ===")
+    print("  pairs", f"{diag.metrics['instance_wise_dice/pairs']:.4f}",
+          " image", f"{diag.metrics['instance_wise_dice/image']:.4f}",
+          " one_to_many", int(diag.metrics['one_to_many']),
+          " many_to_one", int(diag.metrics['many_to_one']))
 
     if args.save_fig:
-        _save_comparison(stems[: args.fig_frames], gt_by_view, pred_maps, args.save_fig)
+        _save_comparison(stems[: args.fig_frames], densest, pred_maps, args.save_fig)
 
 
 def _labels_to_polys(labels: np.ndarray) -> list[np.ndarray]:
@@ -111,10 +127,6 @@ def _save_comparison(stems, gt_by_view, pred_maps, out_path: str) -> None:
         items.append((rgb, f"{stem}\nGT {len(gt_polys)} (magenta) vs pred {len(pr_polys)} (blue)"))
     panel(items, out_path, ncols=3, suptitle="Held-out frames: ground truth vs U-Net prediction")
     print(f"\nwrote comparison -> {out_path}")
-
-
-def _view_labels(view) -> np.ndarray:
-    return rasterize_view_instances(view, 2048, 1.0).astype(np.int32)
 
 
 if __name__ == "__main__":

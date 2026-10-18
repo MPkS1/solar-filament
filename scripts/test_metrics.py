@@ -129,10 +129,70 @@ def test_inter_annotator_reproduction() -> None:
           abs(mean - 0.644) < 0.02)
 
 
+def test_pq_official() -> None:
+    """pq_pooled must reproduce the organizers' get_pq_score semantics."""
+    sq = labelize({1: (slice(10, 20), slice(10, 20))})
+
+    rep = M.pq_pooled([(sq, sq)])
+    check("official PQ: perfect match = 1.0",
+          abs(rep.pq - 1.0) < 1e-9 and (rep.tp, rep.fp, rep.fn) == (1, 0, 0),
+          f"{rep.pq} {rep.tp} {rep.fp} {rep.fn}")
+
+    # one GT missed entirely -> FN (not a free omission)
+    gt2 = labelize({1: (slice(10, 20), slice(10, 20)), 2: (slice(30, 40), slice(30, 40))})
+    rep = M.pq_pooled([(gt2, sq)])
+    check("official PQ: missed GT is an FN",
+          (rep.tp, rep.fp, rep.fn) == (1, 0, 1) and abs(rep.pq - 1 / 1.5) < 1e-9,
+          f"{rep.pq} {rep.tp} {rep.fp} {rep.fn}")
+
+    # one spurious prediction -> FP
+    pred2 = labelize({1: (slice(10, 20), slice(10, 20)), 2: (slice(30, 40), slice(30, 40))})
+    rep = M.pq_pooled([(sq, pred2)])
+    check("official PQ: spurious prediction is an FP",
+          (rep.tp, rep.fp, rep.fn) == (1, 1, 0) and abs(rep.pq - 1 / 1.5) < 1e-9,
+          f"{rep.pq} {rep.tp} {rep.fp} {rep.fn}")
+
+    # degenerate entries
+    empt = np.zeros((64, 64), np.int32)
+    rep = M.pq_pooled([(empt, pred2)])
+    check("official PQ: predictions with no GT are all FP", (rep.tp, rep.fp) == (0, 2) and rep.pq == 0.0)
+    rep = M.pq_pooled([(gt2, empt)])
+    check("official PQ: GT with no prediction are all FN", (rep.tp, rep.fn) == (0, 2) and rep.pq == 0.0)
+
+    # pooled globally, NOT the mean of per-entry PQ
+    weak = labelize({1: (slice(0, 10), slice(0, 7))})   # 70/100 = 0.7 IoU > 0.5 -> TP
+    noise = labelize({1: (slice(40, 46), slice(40, 46)), 2: (slice(50, 56), slice(50, 56)),
+                      3: (slice(56, 62), slice(40, 46)), 4: (slice(40, 46), slice(50, 56))})
+    gt_one = labelize({1: (slice(0, 10), slice(0, 10))})
+    entries = [(gt_one, gt_one), (gt_one, weak), (gt_one, noise)]
+    rep = M.pq_pooled(entries)
+    per_entry = [M.pq_pooled([e]).pq for e in entries]
+    expected_tp = 2          # d (IoU 1.0) and weak (IoU 0.7)
+    expected_fp = 4          # the four noise instances
+    expected_fn = 1          # gt_one unmatched in the noise entry
+    denom = expected_tp + 0.5 * expected_fp + 0.5 * expected_fn
+    check("official PQ: pooled, not per-entry mean",
+          rep.tp == expected_tp and rep.fp == expected_fp and rep.fn == expected_fn
+          and abs(rep.pq - (1.0 + 0.7) / denom) < 1e-9
+          and abs(rep.pq - float(np.mean(per_entry))) > 0.05,
+          f"pooled={rep.pq:.4f} per-entry-mean={np.mean(per_entry):.4f}")
+
+    # matching is strictly IoU > 0.5
+    g = labelize({1: (slice(0, 10), slice(0, 9))})     # 90 px
+    p = labelize({1: (slice(0, 10), slice(3, 12))})    # 90 px, overlap 60 -> IoU exactly 0.5
+    iou = M.iou_overlap_matrix(g, p)
+    check("IoU matrix value is exactly 0.5", abs(iou[0, 0] - 0.5) < 1e-12, f"got {iou[0,0]}")
+    rep = M.pq_pooled([(g, p)])
+    check("official PQ: IoU == 0.5 is NOT a true positive",
+          (rep.tp, rep.fp, rep.fn) == (0, 1, 1) and rep.pq == 0.0,
+          f"{rep.tp} {rep.fp} {rep.fn}")
+
+
 if __name__ == "__main__":
     test_semantic_dice()
     test_reinstantiate()
     test_match_and_pq()
+    test_pq_official()
     test_dataset_aggregation()
     test_inter_annotator_reproduction()
     print()
