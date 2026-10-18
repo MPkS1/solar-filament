@@ -48,6 +48,8 @@ def main() -> None:
                     default=[0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85])
     ap.add_argument("--min-areas", type=int, nargs="+",
                     default=[40, 120, 300, 600, 900])
+    ap.add_argument("--json", default="outputs/tune_postprocess.json",
+                    help="write the best post-processing config here")
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -103,6 +105,24 @@ def main() -> None:
     print(f"\nbest PQ {best['pq']:.4f} at threshold={best['thr']} min_area={best['min_area']} "
           f"(n_pred {best['n_pred']:.1f} vs GT {n_gt:.1f})")
     print("the organizers describe any PQ > 0.35 as 'of great value'")
+
+    if args.json:
+        import json
+        payload = {
+            "threshold": best["thr"],
+            "min_area": best["min_area"],
+            "pq": best["pq"],
+            "semantic_dice": best["sem_dice"],
+            "checkpoint": args.checkpoint,
+            "n_frames": len(stems),
+            "n_annotator_image_entries": n_entries,
+            "mean_gt_instances_per_view": n_gt,
+            "all": rows,
+        }
+        out = Path(args.json)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        print(f"wrote {out}")
 
 
 if __name__ == "__main__":

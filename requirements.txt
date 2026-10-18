@@ -1,7 +1,21 @@
-# Local dev is CPU-only. On Kaggle most of these are pre-installed; the
-# notebook only needs to ensure pycocotools is present.
-numpy>=1.24
-opencv-python>=4.8
-pycocotools>=2.0.7
-torch>=2.1
-matplotlib>=3.7   # EDA only
+# Solar Filament Segmentation Challenge 2026 - dependencies
+#
+# Versions below are the ones the pipeline was developed and verified against
+# (CPU development machine, Python 3.12). Training runs on Kaggle, which
+# provides its own pre-installed builds of these packages; the notebook only
+# needs to add pycocotools.
+#
+# Install:  pip install -r requirements.txt
+
+numpy==2.4.5
+opencv-python==5.0.0.93
+torch==2.13.0
+pycocotools==2.0.11
+
+# EDA figures only (scripts/eda.py); not needed for training or inference.
+matplotlib==3.11.0
+
+# Not imported by this repo. The competition's displayed score uses
+# torchmetrics.segmentation.DiceScore; magfilo.metrics.semantic_dice implements
+# the same foreground-only Dice so the two agree without this dependency.
+# torchmetrics==1.8.1

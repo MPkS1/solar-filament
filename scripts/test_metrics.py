@@ -159,6 +159,13 @@ def test_pq_official() -> None:
     rep = M.pq_pooled([(gt2, empt)])
     check("official PQ: GT with no prediction are all FN", (rep.tp, rep.fn) == (0, 2) and rep.pq == 0.0)
 
+    # an empty entry is not a free 1.0 -- it contributes nothing at all
+    rep = M.pq_pooled([(empt, empt)])
+    check("official PQ: empty entry contributes nothing",
+          (rep.tp, rep.fp, rep.fn) == (0, 0, 0) and rep.pq == 0.0)
+    check("official PQ: empty entries do not perturb a perfect score",
+          abs(M.pq_pooled([(sq, sq), (empt, empt)]).pq - M.pq_pooled([(sq, sq)]).pq) < 1e-12)
+
     # pooled globally, NOT the mean of per-entry PQ
     weak = labelize({1: (slice(0, 10), slice(0, 7))})   # 70/100 = 0.7 IoU > 0.5 -> TP
     noise = labelize({1: (slice(40, 46), slice(40, 46)), 2: (slice(50, 56), slice(50, 56)),

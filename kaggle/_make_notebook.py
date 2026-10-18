@@ -125,20 +125,44 @@ code("""
 md("""
 ## 5. Offline score on the held-out split
 
-Uses the local replica of the scoring (`instance_wise_dice`, semantic Dice,
-Panoptic Quality, one-to-many / many-to-one relations). Remember the
-inter-annotator ceiling is ~0.64 Dice, so do not expect much beyond that.
+The **leaderboard ranks by Panoptic Quality** (re-scored 2026-08-12); the number
+*displayed* on the scoreboard is mean Dice. `scripts/evaluate_val.py` runs the
+organizers' own scoring rule: every annotator view is a separate entry and
+TP/FP/FN are pooled before PQ is formed. The organizers describe any PQ > 0.35
+as "of great value".
+
+Likewise, `scripts/tune_postprocess.py` sweeps the inference threshold and
+minimum filament area and ranks the combinations by that same PQ.
 """)
 
 code("""
-!python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 12
+!python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 16
 """)
 
-md("## 6. Predict the test set and validate the submission")
+code("""
+!python scripts/tune_postprocess.py --checkpoint checkpoints/unet.pt --limit 16
+""")
+
+md("""
+## 6. Predict the test set and validate the submission
+
+The post-processing parameters are taken from the sweep above: the highest-PQ
+combination found on the held-out split, not a hard-coded guess.
+""")
 
 code("""
-!python scripts/infer.py --checkpoint checkpoints/unet.pt --tile 512 --threshold 0.5 \\
-    --min-area 40 --out outputs/submissions/submission.csv
+import json
+from pathlib import Path
+
+cfg = json.loads(Path("outputs/tune_postprocess.json").read_text())
+print("tuned post-processing: threshold", cfg["threshold"], "| min_area", cfg["min_area"],
+      "| held-out PQ", round(cfg["pq"], 4))
+""")
+
+code("""
+!python scripts/infer.py --checkpoint checkpoints/unet.pt --tile 512 \\
+    --threshold {cfg['threshold']} --min-area {cfg['min_area']} \\
+    --out outputs/submissions/submission.csv
 """)
 
 code("""
@@ -153,13 +177,18 @@ The submission is at `/kaggle/working/solar-filament/outputs/submissions/submiss
 
 ## Notes / next steps
 
-- `instance_wise_dice` merges touching masks and fills holes before scoring, and
-  emitting extra instances is penalised -- prefer precision over density.
-- Prefer coverage over abstention: the final rubric scores mean Dice per image,
-  where an empty prediction scores 0.
+- **The leaderboard metric is Panoptic Quality**, pooled over annotator-image
+  entries with `PQ = sum(IoU of TP) / (|TP| + 0.5|FP| + 0.5|FN)`. Predicting
+  nothing scores 0 and flooding the frame with masks scores ~0, so the metric
+  rewards a calibrated density rather than over- or under-detection.
+- Post-processing matters more than it looks: on a first 40-epoch run the
+  default `threshold=0.5, min_area=40` produced ~12 instances per frame against
+  a ground-truth density of ~6, and moving to a higher threshold and a larger
+  minimum area was worth a large PQ gain. Always run the sweep.
 - Ideas to improve: Mask R-CNN / YOLO-seg detector instead of semantic+CC,
-  native-resolution or tiled training, D4 test-time augmentation, and
-  multi-view consensus targets across the repeated annotations.
+  native-resolution or tiled training, D4 test-time augmentation, multi-view
+  consensus targets, longer schedules (40 epochs is a first run), and
+  selecting the checkpoint on full-frame PQ rather than on filament-centred crops.
 """)
 
 nb = {
