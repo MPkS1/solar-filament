@@ -14,6 +14,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -26,6 +27,7 @@ from magfilo.predict import load_model, predict_logits_tiled, prob_to_instances 
 from magfilo.data import rasterize_view_instances  # noqa: E402
 from magfilo.disk import disk_mask  # noqa: E402
 from magfilo.runtime import pick_device  # noqa: E402
+from magfilo.viz import overlay_polygons, panel  # noqa: E402
 
 
 def main() -> None:
@@ -40,6 +42,8 @@ def main() -> None:
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--min-area", type=int, default=40)
     ap.add_argument("--limit", type=int, default=8, help="number of val frames to score")
+    ap.add_argument("--save-fig", default=None, help="render GT vs prediction panels here")
+    ap.add_argument("--fig-frames", type=int, default=6)
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -79,6 +83,34 @@ def main() -> None:
     print("\n=== instance_wise_dice (raw masks, no CC) ===")
     print("  pairs", f"{rep_raw.metrics['instance_wise_dice/pairs']:.4f}",
           " image", f"{rep_raw.metrics['instance_wise_dice/image']:.4f}")
+
+    if args.save_fig:
+        _save_comparison(stems[: args.fig_frames], gt_by_view, pred_maps, args.save_fig)
+
+
+def _labels_to_polys(labels: np.ndarray) -> list[np.ndarray]:
+    polys = []
+    for i in range(1, int(labels.max()) + 1):
+        cnts, _ = cv2.findContours((labels == i).astype(np.uint8), cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        for c in cnts:
+            if c.shape[0] >= 3:
+                polys.append(c.reshape(-1, 2).astype(np.float32))
+    return polys
+
+
+def _save_comparison(stems, gt_by_view, pred_maps, out_path: str) -> None:
+    items = []
+    for stem in stems:
+        img = read_image(paths.TRAIN_IMAGES / f"{stem}.jpeg", scale=0.25)
+        gt_polys = _labels_to_polys(gt_by_view[stem])
+        pr_polys = _labels_to_polys(pred_maps[stem])
+        polys = gt_polys + pr_polys
+        cats = [4] * len(gt_polys) + [1] * len(pr_polys)  # magenta = GT, blue = pred
+        rgb = overlay_polygons(img, polys, cats, scale=0.25, fill_alpha=0.28)
+        items.append((rgb, f"{stem}\nGT {len(gt_polys)} (magenta) vs pred {len(pr_polys)} (blue)"))
+    panel(items, out_path, ncols=3, suptitle="Held-out frames: ground truth vs U-Net prediction")
+    print(f"\nwrote comparison -> {out_path}")
 
 
 def _view_labels(view) -> np.ndarray:
