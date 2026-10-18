@@ -45,9 +45,9 @@ def main() -> None:
     ap.add_argument("--offset", type=int, default=0, help="skip this many val frames first")
     ap.add_argument("--refresh-cache", action="store_true")
     ap.add_argument("--thresholds", type=float, nargs="+",
-                    default=[0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.85])
+                    default=[0.5, 0.7, 0.8, 0.84, 0.88])
     ap.add_argument("--min-areas", type=int, nargs="+",
-                    default=[40, 120, 300, 600, 900])
+                    default=[40, 300, 550, 900])
     ap.add_argument("--json", default="outputs/tune_postprocess.json",
                     help="write the best post-processing config here")
     args = ap.parse_args()
