@@ -102,6 +102,7 @@ scripts/
   infer.py              CLI inference -> submission.csv
   classical_baseline.py no-ML fallback submission
   evaluate_val.py       score a checkpoint on the held-out split (official PQ)
+  probe_metric.py       which scalar the leaderboard shows, from the same masks
   tune_postprocess.py   sweep threshold x min_area, ranked by official PQ
   inspect_checkpoint.py print a checkpoint's args + recorded validation score
   validate_submission.py format + integrity checks, optional preview
@@ -261,6 +262,46 @@ confident it should be on background.
 One test frame (`20200310113230Ch`, March 2020 — solar minimum) receives no predictions at
 all above the tuned threshold. It is not a corrupt frame; it simply has no dark region
 confident enough to survive the filter.
+
+### What the leaderboard actually measures
+
+Two submissions were probed against the leaderboard, which settles a question that had been
+open since the first run:
+
+| submission | our held-out PQ | leaderboard | ratio |
+|---|---|---|---|
+| 3176 rows, 0.5 / 40 | 0.270 | **0.16** | 0.59 |
+| 1641 rows, 0.88 / 550 | 0.424 | **0.28** | 0.66 |
+
+The ordering is preserved, so the held-out PQ is a valid *ranking* signal even though its
+absolute value is inflated. Five candidate definitions were then computed from the **same
+masks**; only one survives:
+
+| candidate | 0.88/550 | 0.5/40 | ratio spread |
+|---|---|---|---|
+| **pooled PQ (IoU > 0.5)** | 0.4235 | 0.2697 | **0.068** |
+| pooled PQ at IoU > 0.65 | 0.2864 | 0.1450 | 0.126 |
+| per-image mean PQ | 0.4252 | 0.2759 | 0.079 |
+| semantic (union) Dice | 0.6817 | 0.6047 | 0.146 |
+| instance-wise Dice (matched pairs) | 0.7316 | 0.6483 | 0.136 |
+
+(`python scripts/probe_metric.py --checkpoint <ckpt>` reproduces this table.)
+
+- **Not semantic Dice.** 0.68 held-out cannot map to 0.16, despite the organizers' wording
+  ("the scoreboard will show ... the mean Dice score"). That wording appears to be inaccurate.
+- **Not instance-wise Dice** either: matched-pair Dice is 0.73, further from the board than PQ.
+- **Not a per-image mean.** Mean per-frame PQ (0.4252) equals pooled PQ (0.4235) to 0.4%, and
+  no held-out frame scores zero, so no catastrophic-frame effect exists.
+- **Not a stricter IoU threshold.** PQ at IoU > 0.65 reproduces both leaderboard values
+  absolutely (0.286 and 0.145), but its two ratios disagree by twice as much as at IoU > 0.5,
+  and 0.65 is a most unusual choice. It cannot be excluded, only disfavoured.
+
+What remains is a uniform test-set difficulty factor of about 0.6, i.e. the test annotation
+protocol is stricter than the train protocol (or the public half is a harder subset). Fitting
+the two points affinely gives `LB ~= 0.78 * PQ_heldout - 0.05`, so a leaderboard 0.64 would
+require a held-out PQ near **0.89**. Against the measured ceiling (matched true positives have
+mean IoU 0.677, capping a *perfect* detector near PQ 0.68), that is not reachable by improving
+this architecture's post-processing. It needs tighter masks *and* better detection together.
 
 ### Post-processing is worth more than extra training
 
