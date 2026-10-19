@@ -1,10 +1,11 @@
 """Offline evaluation on the held-out split, using the official scoring rule.
 
-The leaderboard ranks submissions by **Panoptic Quality**. `magfilo.metrics.
-pq_pooled` is a faithful re-implementation of the organizers'
-`Self_Evaluation_Notebook`, so the number printed here is the number the
-leaderboard would show -- with the caveat that it is measured on our own
-held-out split, against MAGFiLO's multiple annotator views.
+`magfilo.metrics.pq_pooled` is a faithful re-implementation of the organizers'
+`Self_Evaluation_Notebook`. Careful: the organizers state that the leaderboard
+*ranks* by Panoptic Quality but the number *displayed* on the scoreboard is the
+mean Dice, so the PQ printed here is not directly comparable to a scoreboard
+value. It is also measured on our own held-out split, against MAGFiLO's
+multiple annotator views, so it is optimistic relative to the test set.
 
 Every annotator view is scored separately against the same prediction (that is
 what the official scorer does: GT is keyed ``"<annotator>-<image>"``), and the
@@ -50,6 +51,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=8, help="number of val frames to score")
     ap.add_argument("--offset", type=int, default=0, help="skip this many val frames first")
     ap.add_argument("--refresh-cache", action="store_true", help="ignore cached probability maps")
+    ap.add_argument("--preprocess", action="store_true", help="match a checkpoint trained with --preprocess")
+    ap.add_argument("--tta", action="store_true", help="8-way dihedral test-time augmentation")
     ap.add_argument("--save-fig", default=None, help="render GT vs prediction panels here")
     ap.add_argument("--fig-frames", type=int, default=6)
     args = ap.parse_args()
@@ -68,7 +71,8 @@ def main() -> None:
     for stem in stems:
         gray = read_image(paths.TRAIN_IMAGES / f"{stem}.jpeg")
         prob = cached_prob_map(paths.TRAIN_IMAGES / f"{stem}.jpeg", model, device,
-                               tile=args.tile, refresh=args.refresh_cache, gray=gray)
+                               tile=args.tile, refresh=args.refresh_cache, gray=gray,
+                               preprocess=args.preprocess, tta=args.tta)
         labels = prob_to_instances(prob, threshold=args.threshold, min_area=args.min_area,
                                    disk=disk_mask(gray, relative_radius=0.98))
         pred_maps[stem] = labels

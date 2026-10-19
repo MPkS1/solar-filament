@@ -34,6 +34,35 @@ def load_model(checkpoint: str | Path, base: int = 32, depth: int = 4, device: s
     return model
 
 
+def _d4_transforms() -> list[tuple]:
+    """The 8 dihedral transforms, each as a (forward, inverse) pair.
+
+    Solar images carry no canonical orientation for a CNN: the disc is a circle
+    and filaments are elongated structures, so mirroring/rotating a tile and
+    un-mirroring the logits is a free source of extra evidence.
+    """
+    out = []
+    for k in range(4):
+        for flip in (False, True):
+            def fwd(a, k=k, flip=flip):
+                return np.rot90(np.fliplr(a) if flip else a, k)
+
+            def inv(b, k=k, flip=flip):
+                a = np.rot90(b, -k)
+                return np.fliplr(a) if flip else a
+
+            out.append((fwd, inv))
+    return out
+
+
+def _tile_input(patch: np.ndarray, preprocess: bool) -> np.ndarray:
+    """Tiny helper so the training-free path stays byte-identical to before."""
+    if preprocess:
+        return patch.astype(np.float32)
+    p = patch.astype(np.float32) / 255.0
+    return (p - IMAGENET_LIKE[0]) / IMAGENET_LIKE[1]
+
+
 @torch.no_grad()
 def predict_logits_tiled(
     model: UNet,
@@ -42,8 +71,15 @@ def predict_logits_tiled(
     tile: int = 512,
     stride: int | None = None,
     batch_tiles: int = 8,
+    preprocess: bool = False,
+    tta: bool = False,
 ) -> np.ndarray:
-    """Blend tiled logits over a full-resolution grayscale image."""
+    """Blend tiled logits over a full-resolution frame.
+
+    ``gray`` is raw uint8 when ``preprocess=False`` (the model then applies the
+    legacy ``IMAGENET_LIKE`` normalisation) and an already-standardised float32
+    frame when ``preprocess=True``.
+    """
     if stride is None:
         stride = tile // 2
     h, w = gray.shape
@@ -63,17 +99,31 @@ def predict_logits_tiled(
     win = np.outer(win1d, win1d)
 
     coords = [(y, x) for y in ys for x in xs]
-    for i in range(0, len(coords), batch_tiles):
-        chunk = coords[i:i + batch_tiles]
-        batch = []
-        for (y, x) in chunk:
-            patch = gray[y:y + tile, x:x + tile].astype(np.float32) / 255.0
-            patch = (patch - IMAGENET_LIKE[0]) / IMAGENET_LIKE[1]
-            batch.append(patch[None])
+    variants = _d4_transforms() if tta else None
+    step = max(1, batch_tiles // len(variants)) if variants else batch_tiles
+
+    for i in range(0, len(coords), step):
+        chunk = coords[i:i + step]
+        batch, meta = [], []
+        for ci, (y, x) in enumerate(chunk):
+            xin = _tile_input(gray[y:y + tile, x:x + tile], preprocess)
+            if variants is None:
+                batch.append(xin[None])
+                meta.append((ci, None))
+            else:
+                for fwd, inv in variants:
+                    batch.append(np.ascontiguousarray(fwd(xin))[None])
+                    meta.append((ci, inv))
         t = torch.from_numpy(np.stack(batch)).to(device)
         logits = model(t).cpu().numpy()[:, 0]
-        for (y, x), logit in zip(chunk, logits):
-            acc[y:y + tile, x:x + tile] += logit * win
+
+        gathered: dict[int, list[np.ndarray]] = {}
+        for (ci, inv), lg in zip(meta, logits):
+            gathered.setdefault(ci, []).append(lg if inv is None else inv(lg))
+        for ci, (y, x) in enumerate(chunk):
+            blended = gathered[ci][0] if len(gathered[ci]) == 1 \
+                else np.mean(gathered[ci], axis=0)
+            acc[y:y + tile, x:x + tile] += blended.astype(np.float32) * win
             weight[y:y + tile, x:x + tile] += win
     return acc / np.maximum(weight, 1e-6)
 
@@ -159,6 +209,8 @@ def run_inference(
     max_area_frac: float | None = 0.05,
     relative_disk_radius: float | None = 0.98,
     limit: int | None = None,
+    preprocess: bool = False,
+    tta: bool = False,
 ) -> Path:
     model = load_model(checkpoint, base=base, depth=depth, device=device)
     files = list_test_files()
@@ -167,7 +219,13 @@ def run_inference(
     rows: list[tuple[str, str]] = []
     for k, name in enumerate(files, 1):
         gray = read_image(TEST_IMAGES / name)
-        prob = predict_logits_tiled(model, gray, device=device, tile=tile)
+        if preprocess:
+            from .preprocess import preprocess_frame
+            x, _ = preprocess_frame(gray)
+        else:
+            x = gray
+        prob = predict_logits_tiled(model, x, device=device, tile=tile,
+                                    preprocess=preprocess, tta=tta)
         prob = 1.0 / (1.0 + np.exp(-prob))
         disk = disk_mask(gray, relative_radius=relative_disk_radius) if relative_disk_radius else None
         labels = prob_to_instances(

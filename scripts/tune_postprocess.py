@@ -44,6 +44,8 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=16, help="held-out frames to use")
     ap.add_argument("--offset", type=int, default=0, help="skip this many val frames first")
     ap.add_argument("--refresh-cache", action="store_true")
+    ap.add_argument("--preprocess", action="store_true", help="match a checkpoint trained with --preprocess")
+    ap.add_argument("--tta", action="store_true", help="8-way dihedral test-time augmentation")
     ap.add_argument("--thresholds", type=float, nargs="+",
                     default=[0.5, 0.7, 0.8, 0.84, 0.88, 0.92])
     ap.add_argument("--min-areas", type=int, nargs="+",
@@ -68,7 +70,8 @@ def main() -> None:
         img_path = paths.TRAIN_IMAGES / f"{stem}.jpeg"
         gray = read_image(img_path)
         probs[stem] = cached_prob_map(img_path, model, device, tile=args.tile,
-                                      refresh=args.refresh_cache, gray=gray)
+                                      refresh=args.refresh_cache, gray=gray,
+                                      preprocess=args.preprocess, tta=args.tta)
         disks[stem] = disk_mask(gray, relative_radius=0.98)
         # int16 label maps: plenty for instance counts, half the memory of int32
         gts[stem] = [rasterize_view_instances(v, 2048, 1.0).astype(np.int16)

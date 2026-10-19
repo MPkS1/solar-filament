@@ -27,12 +27,16 @@ def main() -> None:
     ap.add_argument("--min-area", type=int, default=550)
     ap.add_argument("--max-area-frac", type=float, default=0.05)
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--preprocess", action="store_true",
+                    help="limb-flattened, local-contrast input (must match how the checkpoint was trained)")
+    ap.add_argument("--tta", action="store_true", help="average the 8 dihedral transforms per tile")
     args = ap.parse_args()
 
     path = run_inference(
         checkpoint=args.checkpoint, out_csv=args.out, base=args.base, depth=args.depth,
         device=pick_device(args.device), tile=args.tile, threshold=args.threshold,
         min_area=args.min_area, max_area_frac=args.max_area_frac, limit=args.limit,
+        preprocess=args.preprocess, tta=args.tta,
     )
     print(f"wrote {path}")
 

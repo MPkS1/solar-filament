@@ -88,6 +88,7 @@ src/magfilo/            reusable toolkit
   coco.py               COCO loader -> View objects, multi-view indexing
   rle.py                polygons <-> mask, mask -> RLE counts
   disk.py               solar-disc geometry
+  preprocess.py         limb-darkening flattening + local-contrast normalisation
   metrics.py            official PQ (`pq_pooled`) + legacy instance-wise Dice diagnostics
   data.py               torch Dataset, by-frame splits, rasterisation, augmentation
   model.py              pure-torch U-Net + losses
@@ -117,19 +118,22 @@ outputs/                generated (git-ignored)
 python scripts/test_metrics.py
 
 # 2. smoke-test the training plumbing on CPU
-python scripts/train.py --smoke
+python scripts/train.py --smoke --preprocess
 
-# 3. real training (Kaggle GPU)
-python scripts/train.py --epochs 40 --batch 16 --crop 512 --base 32 --workers 2
+# 3. real training (Kaggle GPU). --val-pq-frames selects the checkpoint on the
+#    organizers' full-frame PQ instead of Dice over filament-centred crops.
+python scripts/train.py --epochs 40 --batch 16 --crop 512 --base 32 --workers 4 \
+    --preprocess --val-pq-frames 8
 
 # 4. score on the held-out split with the OFFICIAL PQ rule
-python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 16
+python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 16 --preprocess
 
 # 4b. tune post-processing (probability maps are cached; re-runs are cheap)
-python scripts/tune_postprocess.py --checkpoint checkpoints/unet.pt --limit 16
+python scripts/tune_postprocess.py --checkpoint checkpoints/unet.pt --limit 16 --preprocess
 
-# 5. predict the test set and validate
-python scripts/infer.py --checkpoint checkpoints/unet.pt --out outputs/submissions/submission.csv
+# 5. predict the test set and validate (8-way dihedral TTA)
+python scripts/infer.py --checkpoint checkpoints/unet.pt --preprocess --tta \
+    --out outputs/submissions/submission.csv
 python scripts/validate_submission.py outputs/submissions/submission.csv --visualize 6
 
 # no-ML fallback (valid submission, runs on CPU in minutes)
@@ -162,6 +166,75 @@ predictions, which is exactly the ambiguity the organizers removed.
 `python scripts/test_metrics.py` runs **26 analytic checks** — including that PQ is pooled
 rather than a per-image mean, that IoU exactly 0.5 is *not* a true positive, and that a
 prediction with no GT scores 0 — and reproduces the 0.644 inter-annotator agreement from the EDA.
+
+## Version 2: what the leaderboard gap actually was
+
+The tuned submission scored **0.28** on the leaderboard while the held-out estimate said **0.424**.
+That gap was investigated before any tuning, and three hypotheses were eliminated with evidence:
+
+| hypothesis | evidence | verdict |
+|---|---|---|
+| submission encoding / orientation bug | decoded RLE is **bit-identical** to fresh local inference (IoU 1.0000); round trip is not transposed; the organizers' own `mask_util.decode` agrees; masks sit on genuinely dark pixels (mean background−image **6.23** under the masks vs **−0.46** across the disc) | eliminated |
+| train/test domain shift | test is statistically identical to train: mean intensity 83.62 vs 83.58, p99 154.8 vs 155.2, same years, same six stations, all 2048² | eliminated |
+| the held-out estimate was simply too good | it was measured on the same 16 frames used to tune the threshold; an independent disjoint 16 gives **0.363**, not 0.424 | **partly responsible** |
+
+Two real defects remained, and both are fixed in v2.
+
+### 1. The input representation threw away the physics
+
+Every raw frame is dominated by **limb darkening** (the disc is ~2× brighter at the centre
+than at the limb) and by slowly varying background. A network trained on raw grayscale has to
+learn to undo both, and the published MAGFiLO models (EdgeAttNet, MORDEN) do it up front
+instead. `src/magfilo/preprocess.py` now divides out the radial intensity profile, subtracts a
+local background, and standardises over the disc.
+
+Measured on 24 annotated frames:
+
+| | raw | preprocessed |
+|---|---|---|
+| filament contrast (mean over radii) | −0.241 | **−0.62** |
+| contrast spread across the disc (relative) | 41 % | **26 %** |
+| best single global-threshold Dice | 0.0225 | **0.0730** |
+| best single global-threshold PQ | 0.0107 | **0.0182** |
+
+Contrast roughly doubles and becomes more uniform with radius, and a plain global threshold
+improves 3×. The chain costs 69 ms/frame (was 942 ms before vectorising the radial profile and
+estimating the smooth background at ¼ resolution).
+
+### 2. Model selection was measuring the wrong thing
+
+`val_dice` was computed on **filament-centred crops only**. Every crop was guaranteed to contain
+a filament, so the metric could never see background and could not see the false-positive rate —
+which is precisely what the leaderboard punished. `train.py --val-pq-frames N` now runs the
+organizers' pooled PQ on N *whole* held-out frames each epoch and keeps the best checkpoint.
+
+### 3. The remaining error is detection, not instance splitting
+
+Scored against the densest annotator view on 16 held-out frames:
+
+| | count |
+|---|---|
+| true positives | 71 |
+| false positives | **49** (≈40 % of predictions) |
+| false negatives | **41** (≈35 % of ground-truth filaments) |
+| one-to-many relations | 5 |
+| many-to-one relations | 1 |
+
+Only six split/merge relations in total, so connected components are *not* the bottleneck and a
+watershed/boundary head would gain little. The missed filaments are the small ones: median
+**707 px** for a miss vs **1248 px** for a detection, and **36 %** of misses fall below the
+`min_area = 550` floor (vs 9 % of detections). The area floor is therefore doing real damage,
+but only because the small false positives outnumber the small true ones — which is a model
+problem, not a post-processing one.
+
+### Also in v2
+
+- **8-way dihedral TTA** at inference (`--tta`), averaged in logit space per tile.
+- **Cache namespacing.** Probability maps now live under `raw/`, `pre/`, `raw+tta/`, `pre+tta/`.
+  An earlier run silently reused maps from a *different checkpoint* because the cache was flat;
+  that is now structurally impossible.
+- **`--preprocess` must match** between training and inference, and the dataset raises if the
+  combination is inconsistent (preprocessing needs native resolution for the disc geometry).
 
 ## Results
 

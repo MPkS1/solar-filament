@@ -114,33 +114,50 @@ md("""
 
 Splits are by *physical frame*, so the multi-rater views of one image never leak
 across train/val. Targets are binary masks (class labels are noisy and are not
-scored). ~40 epochs at crop 512 is a reasonable first run on a T4.
+scored).
+
+Two things changed from the first baseline:
+
+- `--preprocess` feeds the network limb-flattened, locally contrast-normalised
+  frames instead of raw grayscale. Measured on annotated frames this roughly
+  doubles filament contrast and makes it uniform across the disc, which is what
+  the published MAGFiLO models do.
+- `--val-pq-frames 8` scores eight *whole* held-out frames with the organizers'
+  own PQ every epoch and keeps the best checkpoint. The previous recipe selected
+  on Dice over filament-centred crops, which never sees background and therefore
+  cannot see the false-positive rate -- the reason the held-out estimate and the
+  leaderboard disagreed.
+
+~40 epochs at crop 512 is a reasonable first run on a T4.
 """)
 
 code("""
 !python scripts/train.py --epochs 40 --batch 16 --crop 512 --base 32 \\
-    --lr 3e-4 --val-frac 0.2 --workers 2 --out checkpoints/unet.pt
+    --lr 3e-4 --val-frac 0.2 --workers 4 --preprocess --val-pq-frames 8 \\
+    --out checkpoints/unet.pt
 """)
 
 md("""
 ## 5. Offline score on the held-out split
 
-The **leaderboard ranks by Panoptic Quality** (re-scored 2026-08-12); the number
-*displayed* on the scoreboard is mean Dice. `scripts/evaluate_val.py` runs the
-organizers' own scoring rule: every annotator view is a separate entry and
-TP/FP/FN are pooled before PQ is formed. The organizers describe any PQ > 0.35
+The organizers' overview says the leaderboard **shows the mean Dice** for ~50 % of
+the test images, while the rubric ranks on **Panoptic Quality**. `evaluate_val.py`
+runs the organizers' own scoring rule: every annotator view is a separate entry
+and TP/FP/FN are pooled before PQ is formed. The organizers describe any PQ > 0.35
 as "of great value".
 
-Likewise, `scripts/tune_postprocess.py` sweeps the inference threshold and
-minimum filament area and ranks the combinations by that same PQ.
+`tune_postprocess.py` sweeps the inference threshold and minimum filament area and
+ranks the combinations by that same PQ. Note the sweep now runs in the same
+`--preprocess` space the model was trained in -- previously the offline evaluation
+and the submission pipeline were not scored the same way.
 """)
 
 code("""
-!python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 16
+!python scripts/evaluate_val.py --checkpoint checkpoints/unet.pt --limit 16 --preprocess
 """)
 
 code("""
-!python scripts/tune_postprocess.py --checkpoint checkpoints/unet.pt --limit 16
+!python scripts/tune_postprocess.py --checkpoint checkpoints/unet.pt --limit 16 --preprocess
 """)
 
 md("""
@@ -161,6 +178,7 @@ print("tuned post-processing: threshold", cfg["threshold"], "| min_area", cfg["m
 
 code("""
 !python scripts/infer.py --checkpoint checkpoints/unet.pt --tile 512 \\
+    --preprocess --tta \\
     --threshold {cfg['threshold']} --min-area {cfg['min_area']} \\
     --out outputs/submissions/submission.csv
 """)
@@ -181,14 +199,15 @@ The submission is at `/kaggle/working/solar-filament/outputs/submissions/submiss
   entries with `PQ = sum(IoU of TP) / (|TP| + 0.5|FP| + 0.5|FN)`. Predicting
   nothing scores 0 and flooding the frame with masks scores ~0, so the metric
   rewards a calibrated density rather than over- or under-detection.
-- Post-processing matters more than it looks: on a first 40-epoch run the
-  default `threshold=0.5, min_area=40` produced ~12 instances per frame against
-  a ground-truth density of ~6, and moving to a higher threshold and a larger
-  minimum area was worth a large PQ gain. Always run the sweep.
+- **Instance separation is not the bottleneck.** Measured on 16 held-out frames:
+  only 5 one-to-many and 1 many-to-one relation between predictions and GT, so
+  plain connected components are adequate. The error is *detection*: ~40 % of
+  predictions are spurious and ~35 % of ground-truth filaments are missed, and
+  the missed ones are the small ones (median 707 px vs 1248 px for detected).
 - Ideas to improve: Mask R-CNN / YOLO-seg detector instead of semantic+CC,
-  native-resolution or tiled training, D4 test-time augmentation, multi-view
-  consensus targets, longer schedules (40 epochs is a first run), and
-  selecting the checkpoint on full-frame PQ rather than on filament-centred crops.
+  native-resolution or tiled training, multi-view consensus targets, longer
+  schedules (40 epochs is a first run), and a small classifier on candidate masks
+  to suppress the false positives that currently force an aggressive area floor.
 """)
 
 nb = {

@@ -104,6 +104,8 @@ class FilamentDataset(Dataset):
         scale: float = 1.0,
         pos_crop_prob: float = 0.6,
         limit: int | None = None,
+        preprocess: bool = False,
+        sigma: float = 25.0,
     ):
         self.views = views[:limit] if limit else views
         self.img_dir = img_dir
@@ -111,6 +113,9 @@ class FilamentDataset(Dataset):
         self.train = train
         self.scale = scale
         self.pos_crop_prob = pos_crop_prob
+        self.limit = limit
+        self.preprocess = preprocess
+        self.sigma = sigma
         self._size = int(round(IMAGE_SIZE * scale))
 
     def __len__(self) -> int:
@@ -150,9 +155,19 @@ class FilamentDataset(Dataset):
     # -- main ------------------------------------------------------------
     def __getitem__(self, idx: int) -> Crop:
         view = self.views[idx]
-        img = read_image(self.img_dir / view.file_name, self.scale)
-        if img is None:
-            img = np.zeros((self._size, self._size), np.uint8)
+        if self.preprocess:
+            if self.scale != 1.0:
+                raise ValueError("preprocess=True requires scale=1.0 (the disc geometry is "
+                                 "estimated at native resolution)")
+            from .preprocess import preprocess_frame
+            gray = read_image(self.img_dir / view.file_name, 1.0)
+            if gray is None:
+                gray = np.zeros((IMAGE_SIZE, IMAGE_SIZE), np.uint8)
+            img, _ = preprocess_frame(gray, sigma=self.sigma)
+        else:
+            img = read_image(self.img_dir / view.file_name, self.scale)
+            if img is None:
+                img = np.zeros((self._size, self._size), np.uint8)
         mask = rasterize_view(view, IMAGE_SIZE, self.scale)
 
         if self.train and random.random() < self.pos_crop_prob:
@@ -173,8 +188,11 @@ class FilamentDataset(Dataset):
             img, mask = self._augment(img, mask)
 
         img = np.ascontiguousarray(img)
-        x = img.astype(np.float32) / 255.0
-        x = (x - IMAGENET_LIKE[0]) / IMAGENET_LIKE[1]
+        if self.preprocess:
+            x = img.astype(np.float32)          # already standardised over the disc
+        else:
+            x = img.astype(np.float32) / 255.0
+            x = (x - IMAGENET_LIKE[0]) / IMAGENET_LIKE[1]
         return Crop(
             image=x[None].copy(),
             mask=mask.astype(np.float32)[None].copy(),
@@ -193,10 +211,13 @@ def collate(batch: list[Crop]) -> dict[str, torch.Tensor | list[str]]:
 class TestDataset(Dataset):
     """Whole test images at a reduced scale (for tiled / resized inference)."""
 
-    def __init__(self, file_names: list[str], img_dir: Path = TEST_IMAGES, scale: float = 1.0):
+    def __init__(self, file_names: list[str], img_dir: Path = TEST_IMAGES, scale: float = 1.0,
+                 preprocess: bool = False, sigma: float = 25.0):
         self.file_names = file_names
         self.img_dir = img_dir
         self.scale = scale
+        self.preprocess = preprocess
+        self.sigma = sigma
 
     def __len__(self) -> int:
         return len(self.file_names)
@@ -206,20 +227,28 @@ class TestDataset(Dataset):
         img = read_image(self.img_dir / name, self.scale)
         if img is None:
             img = np.zeros((int(IMAGE_SIZE * self.scale),) * 2, np.uint8)
-        x = img.astype(np.float32) / 255.0
-        x = (x - IMAGENET_LIKE[0]) / IMAGENET_LIKE[1]
-        return {"image": torch.from_numpy(x[None]), "file_name": name, "shape": img.shape}
+        if self.preprocess:
+            from .preprocess import preprocess_frame
+            x, _ = preprocess_frame(img, sigma=self.sigma)
+        else:
+            x = img.astype(np.float32) / 255.0
+            x = (x - IMAGENET_LIKE[0]) / IMAGENET_LIKE[1]
+        return {"image": torch.from_numpy(np.ascontiguousarray(x)[None]), "file_name": name,
+                "shape": img.shape}
 
 
 def list_test_files() -> list[str]:
     return sorted(p.name for p in TEST_IMAGES.glob("*.jpeg"))
 
 
-def build_train_val(crop: int = 512, val_frac: float = 0.2, seed: int = 42, limit: int | None = None):
+def build_train_val(crop: int = 512, val_frac: float = 0.2, seed: int = 42, limit: int | None = None,
+                    preprocess: bool = False):
     coco = load_coco()
     train_stems, val_stems = split_stems(coco, val_frac, seed)
     return (
-        FilamentDataset(views_for_stems(coco, train_stems), crop=crop, train=True, limit=limit),
-        FilamentDataset(views_for_stems(coco, val_stems), crop=crop, train=False, limit=limit),
+        FilamentDataset(views_for_stems(coco, train_stems), crop=crop, train=True, limit=limit,
+                        preprocess=preprocess),
+        FilamentDataset(views_for_stems(coco, val_stems), crop=crop, train=False, limit=limit,
+                        preprocess=preprocess),
         coco,
     )
