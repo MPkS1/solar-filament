@@ -53,9 +53,15 @@ REPO_DIR = Path("/kaggle/working/solar-filament") if Path("/kaggle/working").exi
 
 if not (REPO_DIR / "src" / "magfilo").exists():
     subprocess.run(["git", "clone", "--depth", "1", REPO_URL, str(REPO_DIR)], check=True)
+else:
+    # a re-run in the same session would otherwise silently train on stale code
+    subprocess.run(["git", "-C", str(REPO_DIR), "pull", "--ff-only"], check=False)
 
-print("repo:", REPO_DIR.resolve(), "| exists:", REPO_DIR.exists())
+head = subprocess.run(["git", "-C", str(REPO_DIR), "rev-parse", "--short", "HEAD"],
+                      capture_output=True, text=True).stdout.strip()
+print("repo:", REPO_DIR.resolve(), "| code version:", head)
 print("module:", sorted(p.name for p in (REPO_DIR / "src" / "magfilo").glob("*.py")))
+print("preprocess.py present:", (REPO_DIR / "src" / "magfilo" / "preprocess.py").exists())
 """)
 
 md("""
